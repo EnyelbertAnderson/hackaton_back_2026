@@ -130,3 +130,9 @@ async function enviarExamen(alumnoId: string, nombre: string, archivoImagen: Fil
 * **`400 Bad Request`**: El archivo adjunto no corresponde a una extensión de imagen válida (`image/*`).
 * **`500 Internal Server Error`**: Excepción no controlada dentro de la secuencia de agentes o falla de 
 ```
+
+
+env:
+GOOGLE_API_KEY=tu_api_key_de_google_ai_studio
+ANTHROPIC_API_KEY=tu_api_key_de_anthropic_console
+CHROMA_DATA_DIR=./chroma_data
