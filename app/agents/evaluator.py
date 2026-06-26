@@ -1,80 +1,111 @@
 # app/agents/evaluator.py
-"""Agente evaluador principal: calificación + RAG (Haiku 4.5). Dueño: Dev A."""
-import os
-from anthropic import Anthropic
-import structlog
-from app.rag.chroma_client import NawiVectorStore
-from app.agents.context_packet import EvaluacionResponse
 
-logger = structlog.get_logger()
+from app.agents.context_packet import ContextPacket, EvaluationResult, RubricMatch  # noqa: F401 — tipos en context_packet
+from app.rag.retrieval import retrieve_context
+import re
 
-class EvaluatorAgent:
-    def __init__(self):
-        self.client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-        # Invocar la base de datos de vectores que configuramos antes
-        self.vector_store = NawiVectorStore()
 
-    async def evaluate(self, alumno_id: str, nombre_alumno: str, ocr_text: str) -> EvaluacionResponse:
-        logger.info("Paso 2: Iniciando Evaluación Formativa con Claude Haiku 4.5", alumno_id=alumno_id)
-        
-        # 1. Recuperar contexto normativo del CNEB mediante RAG local
-        logger.info("Consultando criterios en base de datos vectorial...")
-        rag_results = self.vector_store.buscar_competencia(query=ocr_text, n_results=1)
-        contexto_cneb = rag_results["documents"][0][0] if rag_results["documents"][0] else "CNEB General Competencia Matemática"
+def run_evaluator(packet: ContextPacket) -> EvaluationResult:
+    """
+    Evalúa el examen usando:
+    - OCR del alumno
+    - RAG (CNEB / rúbricas)
+    - scoring simple (hackathon MVP)
+    """
 
-        # 2. Diseñar prompts de rol pedagógico
-        system_prompt = (
-            "Eres el Evaluador Pedagógico Inteligente del sistema Ñawi.\n"
-            "Tu tarea es evaluar el examen transcrito de un estudiante basándote estrictamente "
-            "en el contexto del Currículo Nacional (CNEB) provisto.\n"
-            "Debes retornar OBLIGATORIAMENTE un JSON que cumpla exactamente con estas llaves:\n"
-            "{\n"
-            "  \"nota\": \"(Logro Destacado (AD) / Logro Esperado (A) / En Proceso (B) / En Inicio (C))\",\n"
-            "  \"criterio_citado\": \"(Menciona la competencia/capacidad exacta del CNEB aplicada)\",\n"
-            "  \"feedback\": \"(Retroalimentación formativa y empática sobre errores y aciertos)\"\n"
-            "}"
-        )
+    if not packet.ocr:
+        return _empty_result()
 
-        user_content = (
-            f"Contexto CNEB Oficial:\n{contexto_cneb}\n\n"
-            f"Transcripción del Examen del Alumno:\n{ocr_text}"
-        )
+    text = packet.ocr.text
 
-        try:
-            # Llamada síncrona/bloqueante a Anthropic envuelta para el flujo
-            message = self.client.messages.create(
-                model="claude-3-5-haiku-20241022", # Ajustado al identificador disponible de Haiku
-                max_tokens=1000,
-                temperature=0.2,
-                system=system_prompt,
-                messages=[{"role": "user", "content": user_content}]
+    # 1. RAG: traer contexto relevante
+    context = retrieve_context(text, k=3)
+    packet.retrieved_context = context
+
+    # 2. Evaluación simple por heurística (MVP)
+    score, matches = _simple_scoring(text, context)
+
+    feedback = _generate_feedback(score, text)
+
+    return EvaluationResult(
+        total_score=score,
+        feedback=feedback,
+        rubric_matches=matches,
+        strengths=_extract_strengths(text),
+        weaknesses=_extract_weaknesses(text)
+    )
+
+
+# ---------------------------------------------------
+# SCORE SIMPLE (MVP)
+# ---------------------------------------------------
+def _simple_scoring(text: str, context: list[str]):
+    score = 10.0
+    matches = []
+
+    # heurística 1: longitud de respuesta
+    if len(text) > 200:
+        score += 3
+    else:
+        score -= 2
+
+    # heurística 2: palabras clave
+    keywords = {
+        "agua": "ciclo del agua",
+        "evapora": "proceso físico",
+        "plantas": "biología básica",
+        "fotosíntesis": "concepto correcto"
+    }
+
+    for k, concept in keywords.items():
+        if re.search(k, text.lower()):
+            score += 2
+            matches.append(
+                RubricMatch(
+                    competence_id=concept,
+                    expected_criteria=k,
+                    matched_evidence=[k],
+                    score=2,
+                    justification=f"Detectado concepto: {k}"
+                )
             )
-            
-            raw_text = message.content[0].text
-            
-            # Limpiar posibles bloques de formato markdown de la IA
-            if "```json" in raw_text:
-                raw_text = raw_text.split("```json")[1].split("```")[0].strip()
-            
-            # Validar e instanciar usando Pydantic para garantizar robustez
-            import json
-            parsed = json.loads(raw_text)
-            
-            return EvaluacionResponse(
-                alumno_id=alumno_id,
-                nombre_alumno=nombre_alumno,
-                nota=parsed.get("nota", "En Proceso (B)"),
-                criterio_citado=parsed.get("criterio_citado", contexto_cneb[:150]),
-                feedback=parsed.get("feedback", "Buen intento. Sigue practicando."),
-                transcripcion_ocr=ocr_text
-            )
-        except Exception as e:
-            logger.error("Error crítico en Claude Evaluator, aplicando Fallback a formato básico", error=str(e))
-            return EvaluacionResponse(
-                alumno_id=alumno_id,
-                nombre_alumno=nombre_alumno,
-                nota="En Proceso (B)",
-                criterio_citado="Evaluación curricular general",
-                feedback="Se generó una alerta en el procesamiento analítico. El docente revisará manualmente.",
-                transcripcion_ocr=ocr_text
-            )
+
+    # clamp score
+    score = max(0, min(20, score))
+
+    return score, matches
+
+
+# ---------------------------------------------------
+# FEEDBACK SIMPLE
+# ---------------------------------------------------
+def _generate_feedback(score: float, text: str) -> str:
+    if score >= 16:
+        return "Buen dominio del tema. Respuesta clara y correcta."
+    elif score >= 10:
+        return "Respuesta aceptable, pero puede mejorar en profundidad."
+    return "Respuesta insuficiente. Requiere reforzar conceptos clave."
+
+
+def _extract_strengths(text: str) -> list[str]:
+    strengths = []
+    if "explica" in text.lower():
+        strengths.append("Intenta explicar conceptos")
+    if "porque" in text.lower():
+        strengths.append("Incluye razonamiento")
+    return strengths
+
+
+def _extract_weaknesses(text: str) -> list[str]:
+    weaknesses = []
+    if len(text) < 100:
+        weaknesses.append("Respuesta muy corta")
+    return weaknesses
+
+
+def _empty_result():
+    return EvaluationResult(
+        total_score=0,
+        feedback="No se encontró OCR",
+        rubric_matches=[]
+    )
