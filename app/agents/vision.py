@@ -29,11 +29,12 @@ def run_vision(packet: ContextPacket) -> OCRResult:
     try:
         client = genai.Client(api_key=os.environ["GOOGLE_API_KEY"])
         img_b64 = base64.b64encode(packet.image.raw_bytes).decode()
+        mime = packet.image.mime_type or "image/jpeg"
 
         response = client.models.generate_content(
             model="gemini-2.0-flash-lite",
             contents=[
-                types.Part.from_bytes(data=base64.b64decode(img_b64), mime_type="image/jpeg"),
+                types.Part.from_bytes(data=base64.b64decode(img_b64), mime_type=mime),
                 _PROMPT,
             ],
         )

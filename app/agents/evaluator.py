@@ -1,111 +1,108 @@
 # app/agents/evaluator.py
-
-from app.agents.context_packet import ContextPacket, EvaluationResult, RubricMatch  # noqa: F401 — tipos en context_packet
+"""Agente evaluador: analiza respuesta del alumno con Claude + RAG (CNEB)."""
+import os
+import json
+import structlog
+import anthropic
+from app.agents.context_packet import ContextPacket, EvaluationResult, RubricMatch
 from app.rag.retrieval import retrieve_context
-import re
+
+logger = structlog.get_logger()
 
 
 def run_evaluator(packet: ContextPacket) -> EvaluationResult:
-    """
-    Evalúa el examen usando:
-    - OCR del alumno
-    - RAG (CNEB / rúbricas)
-    - scoring simple (hackathon MVP)
-    """
-
-    if not packet.ocr:
+    """Evalúa la respuesta OCR usando Claude + contexto RAG del CNEB."""
+    if not packet.ocr or not packet.ocr.text.strip():
         return _empty_result()
 
     text = packet.ocr.text
 
-    # 1. RAG: traer contexto relevante
-    context = retrieve_context(text, k=3)
-    packet.retrieved_context = context
+    # 1. RAG: recuperar contexto del CNEB relevante
+    try:
+        context_chunks = retrieve_context(text, k=3)
+    except Exception:
+        context_chunks = []
+    packet.retrieved_context = context_chunks
+    context_str = "\n".join(context_chunks) if context_chunks else "No se encontró contexto curricular relevante."
 
-    # 2. Evaluación simple por heurística (MVP)
-    score, matches = _simple_scoring(text, context)
+    # 2. Evaluar con Claude
+    try:
+        client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
-    feedback = _generate_feedback(score, text)
+        prompt = f"""Eres un docente experto en el Currículo Nacional de Educación Básica (CNEB) peruano.
 
-    return EvaluationResult(
-        total_score=score,
-        feedback=feedback,
-        rubric_matches=matches,
-        strengths=_extract_strengths(text),
-        weaknesses=_extract_weaknesses(text)
-    )
+Contexto curricular recuperado:
+{context_str}
 
+Respuesta del estudiante (transcripción literal):
+\"\"\"{text}\"\"\"
 
-# ---------------------------------------------------
-# SCORE SIMPLE (MVP)
-# ---------------------------------------------------
-def _simple_scoring(text: str, context: list[str]):
-    score = 10.0
-    matches = []
+Evalúa la respuesta en escala vigesimal (0-20). Identifica fortalezas, debilidades y errores conceptuales.
 
-    # heurística 1: longitud de respuesta
-    if len(text) > 200:
-        score += 3
-    else:
-        score -= 2
+Responde SOLO con JSON válido:
+{{
+  "total_score": <número 0-20>,
+  "feedback": "<retroalimentación personalizada en 2-3 oraciones>",
+  "strengths": ["fortaleza 1", "fortaleza 2"],
+  "weaknesses": ["debilidad 1", "debilidad 2"],
+  "rubric_matches": [
+    {{
+      "competence_id": "<nombre de competencia CNEB>",
+      "expected_criteria": "<criterio esperado>",
+      "matched_evidence": ["<evidencia encontrada>"],
+      "score": <puntaje parcial>,
+      "justification": "<justificación>"
+    }}
+  ]
+}}"""
 
-    # heurística 2: palabras clave
-    keywords = {
-        "agua": "ciclo del agua",
-        "evapora": "proceso físico",
-        "plantas": "biología básica",
-        "fotosíntesis": "concepto correcto"
-    }
+        message = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=1024,
+            messages=[{"role": "user", "content": prompt}]
+        )
 
-    for k, concept in keywords.items():
-        if re.search(k, text.lower()):
-            score += 2
-            matches.append(
-                RubricMatch(
-                    competence_id=concept,
-                    expected_criteria=k,
-                    matched_evidence=[k],
-                    score=2,
-                    justification=f"Detectado concepto: {k}"
-                )
+        raw = message.content[0].text.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        data = json.loads(raw.strip())
+
+        matches = [
+            RubricMatch(
+                competence_id=m.get("competence_id", ""),
+                expected_criteria=m.get("expected_criteria", ""),
+                matched_evidence=m.get("matched_evidence", []),
+                score=float(m.get("score", 0)),
+                justification=m.get("justification", "")
             )
+            for m in data.get("rubric_matches", [])
+        ]
 
-    # clamp score
-    score = max(0, min(20, score))
+        score = max(0.0, min(20.0, float(data.get("total_score", 10))))
+        logger.info("evaluator.ok", exam_id=packet.exam_id, score=score)
 
-    return score, matches
+        return EvaluationResult(
+            total_score=score,
+            feedback=data.get("feedback", ""),
+            rubric_matches=matches,
+            strengths=data.get("strengths", []),
+            weaknesses=data.get("weaknesses", [])
+        )
 
-
-# ---------------------------------------------------
-# FEEDBACK SIMPLE
-# ---------------------------------------------------
-def _generate_feedback(score: float, text: str) -> str:
-    if score >= 16:
-        return "Buen dominio del tema. Respuesta clara y correcta."
-    elif score >= 10:
-        return "Respuesta aceptable, pero puede mejorar en profundidad."
-    return "Respuesta insuficiente. Requiere reforzar conceptos clave."
-
-
-def _extract_strengths(text: str) -> list[str]:
-    strengths = []
-    if "explica" in text.lower():
-        strengths.append("Intenta explicar conceptos")
-    if "porque" in text.lower():
-        strengths.append("Incluye razonamiento")
-    return strengths
+    except Exception as exc:
+        logger.error("evaluator.error", exam_id=packet.exam_id, error=str(exc))
+        return EvaluationResult(
+            total_score=10.0,
+            feedback=f"No se pudo evaluar automáticamente: {str(exc)[:100]}",
+            rubric_matches=[]
+        )
 
 
-def _extract_weaknesses(text: str) -> list[str]:
-    weaknesses = []
-    if len(text) < 100:
-        weaknesses.append("Respuesta muy corta")
-    return weaknesses
-
-
-def _empty_result():
+def _empty_result() -> EvaluationResult:
     return EvaluationResult(
         total_score=0,
-        feedback="No se encontró OCR",
+        feedback="No se encontró texto en la imagen.",
         rubric_matches=[]
     )

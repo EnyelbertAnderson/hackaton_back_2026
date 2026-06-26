@@ -1,141 +1,59 @@
-## 1. Endpoint de Evaluación Individual
+# Ñawi — Plataforma de Inteligencia Pedagógica
 
-Procesa una fotografía del examen manuscrito de un estudiante enviada desde el celular del docente. El procesamiento se realiza estrictamente en memoria (sin persistencia en disco) para resguardar la privacidad y seguridad de los datos de menores de edad.
+## Requisitos
+- Python 3.11+
+- Google AI Studio API Key (para OCR con Gemini)
+- Anthropic API Key (para evaluación, verificación y diagnóstico)
 
-* **URL:** `/evaluar`
-* **Método:** `POST`
-* **Content-Type:** `multipart/form-data`
+## Instalación y ejecución
 
-### Parámetros de Entrada (Form Fields)
+```bash
+# 1. Crear entorno virtual
+python -m venv .venv
+source .venv/bin/activate        # Linux/Mac
+.venv\Scripts\activate           # Windows
 
-| Campo | Tipo | Requerido | Descripción | Ejemplo |
-| :--- | :--- | :--- | :--- | :--- |
-| `alumno_id` | `string` | Sí | Identificador único del estudiante. | `ALU-2026-041` |
-| `nombre_alumno` | `string` | Sí | Nombre completo del estudiante. | `Juan Pérez Flores` |
-| `file` | `file (binary)` | Sí | Fotografía o captura del examen (PNG, JPG, JPEG). | `examen_matematica.png` |
+# 2. Instalar dependencias
+pip install fastapi uvicorn anthropic google-genai chromadb \
+            pydantic pydantic-settings structlog python-multipart \
+            python-dotenv
 
-### JSON de Respuesta (`200 OK`)
+# 3. Configurar variables de entorno
+cp .env.example .env
+# Editar .env con tus API keys reales
 
-El pipeline retorna un objeto JSON estructurado mapeado directamente desde el `context_packet.py` compartido:
+# 4. Indexar el CNEB en ChromaDB (solo la primera vez)
+python -m app.scripts.indexar_cneb
 
-
+# 5. Levantar el servidor
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-```text
-SUCCESS
+## Endpoints
 
-```json
-{
-  "alumno_id": "ALU-2026-041",
-  "nombre_alumno": "Juan Pérez Flores",
-  "nota": "Aceptable (A)",
-  "criterio_citado": "Competencia: Resuelve problemas de forma, movimiento y localización. Capacidad: Modela objetos con formas geométricas.",
-  "feedback": "Buen planteamiento conceptual y ejecución del cálculo numérico del área. Sin embargo, omitió colocar las unidades correspondientes en la respuesta final (cm²).",
-  "transcripcion_ocr": "[Transcripción de Examen] El alumno resolvió: Area = 5cm x 4cm = 20."
-}
+### POST /evaluar
+Evalúa un examen manuscrito fotografiado.
 
+```bash
+curl -X POST http://localhost:8000/evaluar \
+  -F "image=@examen.jpg" \
+  -F "student_id=ALU-001" \
+  -F "session_id=SESION-2026-01" \
+  -F "docente_id=DOC-001"
 ```
 
----
+### GET /aula/{aula_id}/diagnostico
+Diagnóstico consolidado del aula.
 
-## 2. Endpoint de Diagnóstico de Aula
-
-Consolida la analítica predictiva y formativa extraída por el agente de diagnóstico (`diagnostic` corriendo bajo el free-tier de Gemini) para pintar los gráficos, listas de errores y recomendaciones curriculares en el Dashboard del docente.
-
-* **URL:** `/aula/{aula_id}/diagnostico`
-* **Método:** `GET`
-* **Parámetro de Ruta:** `aula_id` (string) — Identificador de la sección escolar.
-
-### JSON de Respuesta (`200 OK`)
-
-```json
-{
-  "aula_id": "5to-A-Primaria",
-  "errores_comunes": [
-    "Confusión recurrente entre los conceptos curriculares de perímetro y área.",
-    "Omisión sistemática de unidades de medida (cm, m, cm²) en las respuestas finales."
-  ],
-  "puntos_fuertes": [
-    "Excelente nivel de planteamiento algebraico y manipulación de variables en el aula.",
-    "Comprensión unánime de operaciones aritméticas básicas de multiplicación."
-  ],
-  "recomendaciones_cneb": [
-    "Reforzar de manera práctica la competencia 'Resuelve problemas de forma, movimiento y localización' del Currículo Nacional.",
-    "Implementar dinámicas de modelado gráfico y geométrico antes de pasar al cálculo aritmético puro."
-  ],
-  "resumen_rendimiento": "El 65% del aula domina la formulación teórica pero requiere refuerzo inmediato en geometría y unidades aplicadas."
-}
-
+```bash
+curl http://localhost:8000/aula/5A/diagnostico
 ```
 
----
+## Pipeline de agentes
+1. **Vision** (Gemini Flash-Lite) → OCR del examen manuscrito
+2. **Evaluator** (Claude Haiku + RAG) → Puntaje y feedback personalizado
+3. **Verifier** (Claude Haiku) → Coherencia entre nota y respuesta
+4. **Diagnostic** (Claude Haiku) → Clasificación y errores del estudiante
 
-## 3. Guía de Integración desde el Frontend (Next.js / TypeScript)
-
-Para conectar tu formulario de captura y componentes del Dashboard, consume la API usando los siguientes contratos de tipos:
-
-### Definición de Interfaces (TypeScript)
-
-```typescript
-// frontend/lib/types/api.ts
-
-export interface EvaluacionResponse {
-  alumno_id: string;
-  nombre_alumno: string;
-  nota: string;
-  criterio_citado: string;
-  feedback: string;
-  transcripcion_ocr?: string;
-}
-
-export interface DiagnosticoAulaResponse {
-  aula_id: string;
-  errores_comunes: string[];
-  puntos_fuertes: string[];
-  recomendaciones_cneb: string[];
-  resumen_rendimiento: string;
-}
-
-```
-
-### Ejemplo de Petición con Fetch (`FormData`)
-
-```typescript
-// Ejemplo de llamada para subir el examen desde el celular del docente
-async function enviarExamen(alumnoId: string, nombre: string, archivoImagen: File): Promise<EvaluacionResponse> {
-  const formData = new FormData();
-  formData.append('alumno_id', alumnoId);
-  formData.append('nombre_alumno', nombre);
-  formData.append('file', archivoImagen);
-
-  const response = await fetch('[http://127.0.0.1:8000/evaluar](http://127.0.0.1:8000/evaluar)', {
-    method: 'POST',
-    body: formData, // Fetch asigna automáticamente el Content-Type correcto como multipart/form-data
-  });
-
-  if (!response.ok) {
-    throw new Error('Error al procesar la evaluación agéntica');
-  }
-
-  return response.json();
-}
-
-```
-
----
-
-## 4. Códigos de Estado Comunes
-
-* **`200 OK`**: Petición procesada exitosamente por el pipeline agéntico.
-* **`400 Bad Request`**: El archivo adjunto no corresponde a una extensión de imagen válida (`image/*`).
-* **`500 Internal Server Error`**: Excepción no controlada dentro de la secuencia de agentes o falla de 
-```
-
-
-# Configuración del Entorno de Ñawi
-GOOGLE_API_KEY=tu_api_key_real_de_google_ai_studio
-ANTHROPIC_API_KEY=tu_api_key_real_de_anthropic_console
-OPENAI_API_KEY=tu_api_key_real_de_openai_si_usas_el_fallback
-
-# Configuración de Rutas de Datos
-CHROMA_DATA_DIR=./chroma_data
+## Docs interactivas
+Una vez levantado: http://localhost:8000/docs

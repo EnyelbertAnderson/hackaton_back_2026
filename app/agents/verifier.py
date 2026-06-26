@@ -1,57 +1,61 @@
 # app/agents/verifier.py
-"""Agente verificador de calidad y coherencia formativa (Gemini). Dueño: Dev C."""
+"""Agente verificador de coherencia pedagógica (Claude). Dueño: Dev C."""
 import os
-from google import genai
-from google.genai import types
 import structlog
-from app.agents.context_packet import EvaluacionResponse
+import anthropic
+from app.agents.context_packet import ContextPacket, VerificationResult
 
 logger = structlog.get_logger()
 
-class VerifierAgent:
-    def __init__(self):
-        # Utiliza la nueva SDK de Google GenAI especificada en requirements y AGENTS.md
-        api_key = os.getenv("GOOGLE_API_KEY")
-        self.client = genai.Client(api_key=api_key)
-        self.model_name = "gemini-2.5-flash"  # Reemplazo óptimo para Flash-Lite en la SDK actual
 
-    async def verify(self, current_packet: EvaluacionResponse) -> EvaluacionResponse:
-        logger.info("Paso 3: Iniciando control de calidad en Agente Verificador", alumno_id=current_packet.alumno_id)
-        
-        prompt_sistema = (
-            "Eres un agente auditor de consistencia pedagógica experto en el Currículo Nacional Peruano.\n"
-            "Tu única tarea es analizar la respuesta de evaluación de un examen y verificar si existe "
-            "alguna contradicción evidente entre la nota asignada, la transcripción del examen y el feedback dado.\n"
-            "Si encuentras discrepancias graves, ajusta o refina el feedback para corregir la contradicción. "
-            "Si todo es correcto, devuelve los campos intactos."
+def run_verifier(packet: ContextPacket) -> VerificationResult:
+    """Verifica coherencia entre OCR, score y feedback. Retorna VerificationResult."""
+    if not packet.ocr or not packet.evaluation:
+        logger.warning("verifier.skip", reason="no ocr o evaluation")
+        return VerificationResult(is_consistent=True, confidence=0.5, needs_review=True,
+                                  motivo="Datos insuficientes para verificar")
+
+    try:
+        client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+
+        prompt = f"""Eres un auditor pedagógico. Revisa si hay contradicción entre:
+- Transcripción: {packet.ocr.text[:500]}
+- Puntaje asignado: {packet.evaluation.total_score} / {packet.evaluation.score_max}
+- Feedback: {packet.evaluation.feedback}
+
+Responde SOLO con JSON válido:
+{{
+  "is_consistent": true o false,
+  "confidence": número entre 0.0 y 1.0,
+  "needs_review": true o false,
+  "motivo": "razón breve si needs_review es true, sino null"
+}}"""
+
+        message = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=256,
+            messages=[{"role": "user", "content": prompt}]
         )
 
-        prompt_usuario = (
-            f"Transcripción del Examen: {current_packet.transcripcion_ocr}\n"
-            f"Nota Asignada: {current_packet.nota}\n"
-            f"Criterio Aplicado: {current_packet.criterio_citado}\n"
-            f"Feedback Propuesto: {current_packet.feedback}"
+        import json
+        text = message.content[0].text.strip()
+        # Limpiar posibles backticks
+        if text.startswith("```"):
+            text = text.split("```")[1]
+            if text.startswith("json"):
+                text = text[4:]
+        data = json.loads(text.strip())
+
+        logger.info("verifier.ok", exam_id=packet.exam_id,
+                    consistent=data.get("is_consistent"), confidence=data.get("confidence"))
+        return VerificationResult(
+            is_consistent=data.get("is_consistent", True),
+            confidence=float(data.get("confidence", 0.8)),
+            needs_review=data.get("needs_review", False),
+            motivo=data.get("motivo")
         )
 
-        try:
-            # Forzar salida en formato JSON estructurado que coincida con nuestro Schema de Pydantic
-            response = self.client.models.generate_content(
-                model=self.model_name,
-                contents=prompt_usuario,
-                config=types.GenerateContentConfig(
-                    system_instruction=prompt_sistema,
-                    response_mime_type="application/json",
-                    response_schema=EvaluacionResponse,
-                    temperature=0.1
-                )
-            )
-            
-            # Pydantic puede leer y validar directamente cadenas de texto estructuradas JSON
-            valid_json = EvaluacionResponse.model_validate_json(response.text)
-            logger.info("Verificación de consistencia completada sin novedades")
-            return valid_json
-
-        except Exception as e:
-            logger.error("Error en la ejecución del Agente Verificador, aplicando fallback", error=str(e))
-            # Fallback seguro: Continuar con los datos del paquete sin detener el servidor de la Hackathon
-            return current_packet
+    except Exception as exc:
+        logger.error("verifier.error", exam_id=packet.exam_id, error=str(exc))
+        return VerificationResult(is_consistent=True, confidence=0.6,
+                                  needs_review=True, motivo=f"Error de verificación: {str(exc)[:80]}")

@@ -1,22 +1,17 @@
 # app/rag/embeddings.py
-
-from typing import List
+"""Embedding mock de 16 dimensiones, estable para hackathon.
+   Reemplazable por OpenAI/Gemini embeddings cambiando solo esta función.
+"""
 import hashlib
+from typing import List
+
+_DIM = 16  # ChromaDB requiere dimensión consistente en la colección
 
 
 def embed_text(text: str) -> List[float]:
-    """
-    Embedding MOCK (hackathon-safe).
-    Reemplazable por OpenAI / Gemini embeddings.
-    """
-
     h = hashlib.sha256(text.encode()).hexdigest()
-
-    # convierte hash en vector numérico simple
-    vec = [int(h[i:i+2], 16) / 255 for i in range(0, 32, 2)]
-
-    return vec
+    return [int(h[i:i+4], 16) / 65535.0 for i in range(0, _DIM * 4, 4)]
 
 
-def embed_batch(texts: list[str]) -> list[list[float]]:
+def embed_batch(texts: List[str]) -> List[List[float]]:
     return [embed_text(t) for t in texts]
