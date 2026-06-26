@@ -1,1 +1,47 @@
+# Entorno virtual y dependencias locales
+.venv/
+env/
+venv/
+ENV/
+bin/
+lib/
+include/
+share/
+
+# Caché de Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Configuración y Secretos (NUNCA commitear claves de API)
 .env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Base de datos vectorial local (ChromaDB) y datos pesados
+chroma_data/
+data/
+chroma.sqlite3
+
+# Frontend (Next.js / Node)
+node_modules/
+.next/
+out/
+build/
+dist/
+.next-env.d.ts
+.eslintcache
+
+# Archivos de Sistema / IDEs
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.bak
