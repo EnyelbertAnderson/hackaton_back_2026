@@ -132,7 +132,10 @@ async function enviarExamen(alumnoId: string, nombre: string, archivoImagen: Fil
 ```
 
 
-env:
-GOOGLE_API_KEY=tu_api_key_de_google_ai_studio
-ANTHROPIC_API_KEY=tu_api_key_de_anthropic_console
+# Configuración del Entorno de Ñawi
+GOOGLE_API_KEY=tu_api_key_real_de_google_ai_studio
+ANTHROPIC_API_KEY=tu_api_key_real_de_anthropic_console
+OPENAI_API_KEY=tu_api_key_real_de_openai_si_usas_el_fallback
+
+# Configuración de Rutas de Datos
 CHROMA_DATA_DIR=./chroma_data
